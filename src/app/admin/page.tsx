@@ -3,7 +3,10 @@ import { SignOutButton } from "@clerk/nextjs";
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
 import { AdminAgentsSection } from "./AdminAgentsSection";
-import { AdminAppointmentsTable } from "./AdminAppointmentsTable";
+import {
+  AdminAppointmentsTable,
+  type Appointment as AdminTableAppointment,
+} from "./AdminAppointmentsTable";
 import { AdminAppointmentsPagination } from "./AdminAppointmentsPagination";
 import { AdminCsvUpload } from "./AdminCsvUpload";
 import { AdminEnterprisesSection } from "./AdminEnterprisesSection";
@@ -22,22 +25,6 @@ const ALL_STATUSES = [
 ] as const;
 
 const PAGE_SIZES = [20, 50, 100] as const;
-
-type AdminAppointment = {
-  id: string;
-  agent_id: string;
-  agentName: string;
-  appointment_datetime: string;
-  prospect_email: string | null;
-  first_name: string | null;
-  last_name: string | null;
-  name: string | null;
-  status: string;
-  age_raw: string | null;
-  assets_raw: string | null;
-  utm_source: string | null;
-  prospect_questions: string | null;
-};
 
 type PageProps = {
   searchParams: Promise<{
@@ -74,7 +61,7 @@ export default async function AdminPage({ searchParams }: PageProps) {
   let totalPages = 1;
   let page = 1;
   let pageSize = 20 as (typeof PAGE_SIZES)[number];
-  let appointmentsWithAgent: AdminAppointment[] = [];
+  let appointmentsWithAgent: AdminTableAppointment[] = [];
   let activeOnly = true;
 
   let enterprisesWithDetails: Array<{
@@ -151,7 +138,7 @@ export default async function AdminPage({ searchParams }: PageProps) {
     totalPages = Math.max(1, Math.ceil(total / pageSize));
 
     const agentMap = new Map((agents ?? []).map((a) => [a.id, a.name]));
-    appointmentsWithAgent = (appointments ?? []).map((apt): AdminAppointment => ({
+    appointmentsWithAgent = (appointments ?? []).map((apt): AdminTableAppointment => ({
       id: apt.id,
       agent_id: apt.agent_id,
       agentName: agentMap.get(apt.agent_id) ?? "—",

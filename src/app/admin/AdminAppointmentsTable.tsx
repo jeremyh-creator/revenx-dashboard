@@ -28,7 +28,7 @@ function formatDateTime(iso: string) {
   });
 }
 
-type Appointment = {
+export type Appointment = {
   id: string;
   agent_id: string;
   agentName: string;
