@@ -1,0 +1,521 @@
+"use server";
+
+import { clerkClient } from "@clerk/nextjs/server";
+import { getAdminAuth } from "@/lib/auth";
+import { createClient } from "@/lib/supabase/server";
+import { revalidatePath } from "next/cache";
+
+const VALID_STATUSES = [
+  "Confirmed",
+  "Show",
+  "No-Show (Approved)",
+  "No-Show (Pending)",
+  "Rescheduled",
+  "Canceled",
+  "Invalid",
+  "Duplicate",
+  "Test",
+  "Other",
+] as const;
+
+export async function updateAppointmentStatus(
+  appointmentId: string,
+  newStatus: string
+) {
+  const admin = await getAdminAuth();
+  if (!admin) {
+    return { error: "Unauthorized" };
+  }
+
+  if (!VALID_STATUSES.includes(newStatus as (typeof VALID_STATUSES)[number])) {
+    return { error: "Invalid status" };
+  }
+
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("appointments")
+    .update({
+      status: newStatus,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", appointmentId);
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function addAgent(name: string, emails: string[]) {
+  const admin = await getAdminAuth();
+  if (!admin) {
+    return { error: "Unauthorized" };
+  }
+
+  if (!name.trim()) {
+    return { error: "Name is required" };
+  }
+  if (emails.length === 0) {
+    return { error: "At least one email is required" };
+  }
+
+  const supabase = await createClient();
+
+  const { error } = await supabase.from("agents").insert({
+    name: name.trim(),
+    emails,
+    is_active: true,
+  });
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function updateAgent(
+  agentId: string,
+  updates: { name?: string; emails?: string[] }
+) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const supabase = await createClient();
+  const payload: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (updates.name != null && updates.name.trim()) {
+    payload.name = updates.name.trim();
+  }
+  if (updates.emails != null) {
+    payload.emails = updates.emails
+      .map((e) => e.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
+  if (Object.keys(payload).length <= 1) return { error: "No updates provided" };
+
+  const { error } = await supabase
+    .from("agents")
+    .update(payload)
+    .eq("id", agentId);
+
+  if (error) return { error: error.message };
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function setAgentActive(agentId: string, isActive: boolean) {
+  const admin = await getAdminAuth();
+  if (!admin) {
+    return { error: "Unauthorized" };
+  }
+
+  const supabase = await createClient();
+
+  const { error } = await supabase
+    .from("agents")
+    .update({
+      is_active: isActive,
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", agentId);
+
+  if (error) {
+    return { error: error.message };
+  }
+
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function mergeAgents(
+  primaryAgentId: string,
+  secondaryAgentId: string
+) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+  if (primaryAgentId === secondaryAgentId) {
+    return { error: "Cannot merge an agent with itself" };
+  }
+
+  const supabase = await createClient();
+
+  const { data: primary, error: primaryErr } = await supabase
+    .from("agents")
+    .select("id, name, emails")
+    .eq("id", primaryAgentId)
+    .single();
+  const { data: secondary, error: secondaryErr } = await supabase
+    .from("agents")
+    .select("id, name, emails")
+    .eq("id", secondaryAgentId)
+    .single();
+
+  if (primaryErr || !primary || secondaryErr || !secondary) {
+    return { error: "One or both agents not found" };
+  }
+
+  const primaryEmails = new Set((primary.emails ?? []) as string[]);
+  const secondaryEmails = (secondary.emails ?? []) as string[];
+  secondaryEmails.forEach((e) => primaryEmails.add(e.toLowerCase().trim()));
+
+  const { error: updateAppts } = await supabase
+    .from("appointments")
+    .update({ agent_id: primaryAgentId })
+    .eq("agent_id", secondaryAgentId);
+
+  if (updateAppts) return { error: updateAppts.message };
+
+  const { data: secondaryRollups } = await supabase
+    .from("agent_rollups")
+    .select("rollup_id")
+    .eq("agent_id", secondaryAgentId);
+
+  for (const r of secondaryRollups ?? []) {
+    await supabase.from("agent_rollups").upsert(
+      { agent_id: primaryAgentId, rollup_id: r.rollup_id },
+      { onConflict: "agent_id,rollup_id", ignoreDuplicates: true }
+    );
+  }
+  await supabase.from("agent_rollups").delete().eq("agent_id", secondaryAgentId);
+
+  const { error: updatePrimary } = await supabase
+    .from("agents")
+    .update({
+      emails: Array.from(primaryEmails),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", primaryAgentId);
+
+  if (updatePrimary) return { error: updatePrimary.message };
+
+  const { error: deactivateSecondary } = await supabase
+    .from("agents")
+    .update({ is_active: false, updated_at: new Date().toISOString() })
+    .eq("id", secondaryAgentId);
+
+  if (deactivateSecondary) return { error: deactivateSecondary.message };
+
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+function parseCsvLine(line: string): string[] {
+  const result: string[] = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (c === '"') {
+      inQuotes = !inQuotes;
+    } else if (inQuotes) {
+      current += c;
+    } else if (c === "," || c === ";" || c === "\t") {
+      result.push(current.trim());
+      current = "";
+    } else {
+      current += c;
+    }
+  }
+  result.push(current.trim());
+  return result;
+}
+
+export async function uploadAppointmentsCsv(
+  csvText: string,
+  columnMapping: Record<string, string>
+): Promise<{ imported: number; errors: string[] }> {
+  const admin = await getAdminAuth();
+  if (!admin) {
+    return { imported: 0, errors: ["Unauthorized"] };
+  }
+
+  const agentEmailKey = columnMapping["agent_email"];
+  const agentNameKey = columnMapping["agent_name"];
+  const datetimeKey = columnMapping["appointment_datetime"];
+  if (!datetimeKey) {
+    return { imported: 0, errors: ["appointment_datetime mapping is required"] };
+  }
+  if (!agentEmailKey && !agentNameKey) {
+    return { imported: 0, errors: ["Map either agent_email or agent_name"] };
+  }
+
+  const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) {
+    return { imported: 0, errors: ["CSV must have a header row and at least one data row"] };
+  }
+
+  const headerLine = lines[0];
+  const headers = parseCsvLine(headerLine);
+  const headerIndex = new Map(headers.map((h, i) => [h.trim(), i]));
+
+  const supabase = await createClient();
+
+  async function getOrCreateAgentByEmail(email: string): Promise<string | null> {
+    const normalizedEmail = email.toLowerCase().trim();
+    const { data: agents } = await supabase
+      .from("agents")
+      .select("id, emails")
+      .overlaps("emails", [normalizedEmail])
+      .limit(1);
+
+    if (agents && agents.length > 0) return agents[0].id;
+
+    const displayName = normalizedEmail.split("@")[0].replace(/[._]/g, " ");
+    const { data: newAgent, error: insertError } = await supabase
+      .from("agents")
+      .insert({ name: displayName, emails: [normalizedEmail], is_active: true })
+      .select("id")
+      .single();
+
+    if (insertError) return null;
+    return newAgent?.id ?? null;
+  }
+
+  async function getAgentByName(name: string): Promise<string | null> {
+    const trimmed = name.trim();
+    if (!trimmed) return null;
+    const { data } = await supabase
+      .from("agents")
+      .select("id")
+      .ilike("name", trimmed)
+      .limit(1)
+      .maybeSingle();
+    return data?.id ?? null;
+  }
+
+  const STATUS_MAP: Record<string, string> = {
+    cancelled: "Canceled",
+    canceled: "Canceled",
+    noshow: "No-Show (Approved)",
+    "no-show": "No-Show (Approved)",
+    "no show": "No-Show (Approved)",
+    showed: "Show",
+    show: "Show",
+    confirmed: "Confirmed",
+    invalid: "Invalid",
+    rescheduled: "Rescheduled",
+    duplicate: "Duplicate",
+    test: "Test",
+    other: "Other",
+  };
+
+  let imported = 0;
+  const errors: string[] = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    const values = parseCsvLine(lines[i]);
+    if (values.length !== headers.length && values.every((v) => !v)) continue;
+
+    const getVal = (dbKey: string) => {
+      const csvCol = columnMapping[dbKey];
+      if (!csvCol) return null;
+      const idx = headerIndex.get(csvCol);
+      if (idx === undefined) return null;
+      const v = values[idx];
+      return v != null && v !== "" ? v : null;
+    };
+
+    const agentEmailRaw = getVal("agent_email");
+    const agentNameRaw = getVal("agent_name");
+    const datetimeRaw = getVal("appointment_datetime");
+    if (!datetimeRaw) {
+      errors.push(`Row ${i + 1}: missing appointment date/time`);
+      continue;
+    }
+    if (!agentEmailRaw && !agentNameRaw) {
+      errors.push(`Row ${i + 1}: missing agent email or agent name`);
+      continue;
+    }
+
+    let agentId: string | null = null;
+    if (agentEmailRaw) {
+      agentId = await getOrCreateAgentByEmail(agentEmailRaw);
+    }
+    if (!agentId && agentNameRaw) {
+      agentId = await getAgentByName(agentNameRaw);
+    }
+    if (!agentId) {
+      errors.push(
+        `Row ${i + 1}: agent not found for "${agentEmailRaw || agentNameRaw}" (create the agent first or use agent email to auto-create)`
+      );
+      continue;
+    }
+
+    let appointmentDatetime: string;
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(datetimeRaw)) {
+      const d = new Date(datetimeRaw);
+      if (isNaN(d.getTime())) {
+        errors.push(`Row ${i + 1}: invalid date "${datetimeRaw}"`);
+        continue;
+      }
+      appointmentDatetime = d.toISOString();
+    } else {
+      appointmentDatetime = datetimeRaw;
+    }
+
+    const statusRaw = (getVal("status") ?? "").toLowerCase().trim();
+    const status =
+      STATUS_MAP[statusRaw] ??
+      (statusRaw && VALID_STATUSES.includes(statusRaw as any) ? statusRaw : "Confirmed");
+
+    const row = {
+      agent_id: agentId,
+      prospect_email: getVal("prospect_email"),
+      first_name: getVal("prospect_first_name"),
+      last_name: getVal("prospect_last_name"),
+      name: getVal("prospect_name"),
+      appointment_datetime: appointmentDatetime,
+      age_raw: getVal("age_raw"),
+      assets_raw: getVal("assets_raw"),
+      utm_source: getVal("utm_source"),
+      prospect_questions: getVal("prospect_questions"),
+      status,
+      is_final_instance: true,
+    };
+
+    const { error } = await supabase.from("appointments").insert(row);
+    if (error) {
+      errors.push(`Row ${i + 1}: ${error.message}`);
+    } else {
+      imported++;
+    }
+  }
+
+  revalidatePath("/admin");
+  return { imported, errors };
+}
+
+// ——— Enterprise / IMO ———
+
+export async function createEnterprise(name: string) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+  if (!name.trim()) return { error: "Name is required" };
+
+  const supabase = await createClient();
+  const { data, error } = await supabase
+    .from("enterprises")
+    .insert({ name: name.trim() })
+    .select("id")
+    .single();
+
+  if (error) return { error: error.message };
+  revalidatePath("/admin");
+  return { success: true, enterpriseId: data?.id };
+}
+
+export async function addEnterpriseAgent(enterpriseId: string, agentId: string) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("enterprise_agents")
+    .upsert(
+      { enterprise_id: enterpriseId, agent_id: agentId },
+      { onConflict: "enterprise_id,agent_id", ignoreDuplicates: true }
+    );
+
+  if (error) return { error: error.message };
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function removeEnterpriseAgent(enterpriseId: string, agentId: string) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const supabase = await createClient();
+  const { error } = await supabase
+    .from("enterprise_agents")
+    .delete()
+    .eq("enterprise_id", enterpriseId)
+    .eq("agent_id", agentId);
+
+  if (error) return { error: error.message };
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function createEnterpriseUser(
+  enterpriseId: string,
+  email: string,
+  password: string
+) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const trimmedEmail = email.trim().toLowerCase();
+  if (!trimmedEmail) return { error: "Email is required" };
+  if (!password || password.length < 8) return { error: "Password must be at least 8 characters" };
+
+  const supabase = await createClient();
+  const { data: enterprise } = await supabase
+    .from("enterprises")
+    .select("id, name")
+    .eq("id", enterpriseId)
+    .single();
+  if (!enterprise) return { error: "Enterprise not found" };
+
+  const client = await clerkClient();
+  let clerkUser;
+  try {
+    clerkUser = await client.users.createUser({
+      emailAddress: [trimmedEmail],
+      password,
+      publicMetadata: {
+        role: "enterprise",
+        enterprise_id: enterpriseId,
+      },
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Failed to create user in Clerk";
+    return { error: msg };
+  }
+
+  const { error } = await supabase.from("enterprise_users").insert({
+    enterprise_id: enterpriseId,
+    clerk_user_id: clerkUser.id,
+    email: trimmedEmail,
+  });
+
+  if (error) return { error: error.message };
+  revalidatePath("/admin");
+  return { success: true };
+}
+
+export async function deleteEnterpriseUser(enterpriseUserId: string) {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const supabase = await createClient();
+  const { data: eu, error: fetchErr } = await supabase
+    .from("enterprise_users")
+    .select("clerk_user_id")
+    .eq("id", enterpriseUserId)
+    .single();
+
+  if (fetchErr || !eu) return { error: "Enterprise user not found" };
+
+  const client = await clerkClient();
+  try {
+    await client.users.deleteUser(eu.clerk_user_id);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : "Failed to delete user from Clerk";
+    return { error: msg };
+  }
+
+  const { error: deleteErr } = await supabase
+    .from("enterprise_users")
+    .delete()
+    .eq("id", enterpriseUserId);
+
+  if (deleteErr) return { error: deleteErr.message };
+  revalidatePath("/admin");
+  return { success: true };
+}
