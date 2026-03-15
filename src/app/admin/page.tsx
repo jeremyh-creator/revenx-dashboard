@@ -23,6 +23,22 @@ const ALL_STATUSES = [
 
 const PAGE_SIZES = [20, 50, 100] as const;
 
+type AdminAppointment = {
+  id: string;
+  agent_id: string;
+  agentName: string;
+  appointment_datetime: string;
+  prospect_email: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  name: string | null;
+  status: string;
+  age_raw: string | null;
+  assets_raw: string | null;
+  utm_source: string | null;
+  prospect_questions: string | null;
+};
+
 type PageProps = {
   searchParams: Promise<{
     tab?: string;
@@ -58,7 +74,7 @@ export default async function AdminPage({ searchParams }: PageProps) {
   let totalPages = 1;
   let page = 1;
   let pageSize = 20 as (typeof PAGE_SIZES)[number];
-  let appointmentsWithAgent: Array<Record<string, unknown> & { agentName: string }> = [];
+  let appointmentsWithAgent: AdminAppointment[] = [];
   let activeOnly = true;
 
   let enterprisesWithDetails: Array<{
@@ -135,9 +151,20 @@ export default async function AdminPage({ searchParams }: PageProps) {
     totalPages = Math.max(1, Math.ceil(total / pageSize));
 
     const agentMap = new Map((agents ?? []).map((a) => [a.id, a.name]));
-    appointmentsWithAgent = (appointments ?? []).map((apt) => ({
-      ...apt,
+    appointmentsWithAgent = (appointments ?? []).map((apt): AdminAppointment => ({
+      id: apt.id,
+      agent_id: apt.agent_id,
       agentName: agentMap.get(apt.agent_id) ?? "—",
+      appointment_datetime: apt.appointment_datetime,
+      prospect_email: apt.prospect_email ?? null,
+      first_name: apt.first_name ?? null,
+      last_name: apt.last_name ?? null,
+      name: apt.name ?? null,
+      status: apt.status,
+      age_raw: apt.age_raw ?? null,
+      assets_raw: apt.assets_raw ?? null,
+      utm_source: apt.utm_source ?? null,
+      prospect_questions: apt.prospect_questions ?? null,
     }));
   }
 
