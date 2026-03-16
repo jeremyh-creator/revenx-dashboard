@@ -28,6 +28,69 @@ export function AdminCsvUpload({ agents }: Props) {
   const [mapping, setMapping] = useState<Record<string, string>>({});
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<{ imported: number; errors: string[] } | null>(null);
+  const [estimatedRows, setEstimatedRows] = useState<number | null>(null);
+
+  function buildInitialMapping(headers: string[]): Record<string, string> {
+    const normalized = headers.map((h) => ({
+      raw: h,
+      norm: h.toLowerCase().replace(/[\s_\-]/g, ""),
+    }));
+
+    const mapping: Record<string, string> = {};
+    const used = new Set<string>();
+
+    function findHeader(candidates: string[]): string | null {
+      for (const cand of candidates) {
+        const found = normalized.find(
+          (h) => h.norm === cand || h.norm.includes(cand) || cand.includes(h.norm)
+        );
+        if (found && !used.has(found.raw)) {
+          used.add(found.raw);
+          return found.raw;
+        }
+      }
+      return null;
+    }
+
+    const agentEmails = ["agentemail", "email", "hostsemail", "hostemail"];
+    const agentNames = ["agent", "agentname", "advisor", "host"];
+    const startTimes = [
+      "appointmentdatetime",
+      "starttime",
+      "eventstarttime",
+      "eventtime",
+      "datetime",
+      "date",
+      "scheduledat",
+    ];
+    const prospectEmails = ["prospectemail", "inviteeemail", "clientemail"];
+    const prospectNames = ["prospectname", "inviteename", "clientname"];
+    const firstNames = ["firstname", "inviteefirstname", "clientfirstname"];
+    const lastNames = ["lastname", "inviteelastname", "clientlastname"];
+
+    const hAgentEmail = findHeader(agentEmails);
+    if (hAgentEmail) mapping["agent_email"] = hAgentEmail;
+
+    const hAgentName = findHeader(agentNames);
+    if (hAgentName) mapping["agent_name"] = hAgentName;
+
+    const hStart = findHeader(startTimes);
+    if (hStart) mapping["appointment_datetime"] = hStart;
+
+    const hProspectEmail = findHeader(prospectEmails);
+    if (hProspectEmail) mapping["prospect_email"] = hProspectEmail;
+
+    const hProspectName = findHeader(prospectNames);
+    if (hProspectName) mapping["prospect_name"] = hProspectName;
+
+    const hFirstName = findHeader(firstNames);
+    if (hFirstName) mapping["prospect_first_name"] = hFirstName;
+
+    const hLastName = findHeader(lastNames);
+    if (hLastName) mapping["prospect_last_name"] = hLastName;
+
+    return mapping;
+  }
 
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const f = e.target.files?.[0];
@@ -35,10 +98,12 @@ export function AdminCsvUpload({ agents }: Props) {
     setFile(f);
     setResult(null);
     const text = await f.text();
-    const firstLine = text.split("\n")[0];
+    const lines = text.split(/\r?\n/).filter((l) => l.trim());
+    const firstLine = lines[0] ?? "";
     const headers = firstLine.split(/[,;\t]/).map((h) => h.trim().replace(/^["']|["']$/g, ""));
     setCsvHeaders(headers);
-    setMapping({});
+    setMapping(buildInitialMapping(headers));
+    setEstimatedRows(Math.max(0, lines.length - 1));
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -83,6 +148,13 @@ export function AdminCsvUpload({ agents }: Props) {
         {csvHeaders.length > 0 && (
           <form onSubmit={handleSubmit} className="space-y-4">
             <p className="text-sm font-medium text-slate-700">Map columns:</p>
+            {estimatedRows != null && (
+              <p className="text-xs text-slate-500">
+                Detected approximately {estimatedRows.toLocaleString()} data row
+                {estimatedRows === 1 ? "" : "s"}. We prefilled close matches for you; adjust as
+                needed.
+              </p>
+            )}
             <div className="grid gap-3 max-h-64 overflow-y-auto">
               {DB_FIELDS.map((field) => (
                 <div key={field.key} className="flex items-center gap-3">
@@ -117,6 +189,17 @@ export function AdminCsvUpload({ agents }: Props) {
             >
               {isProcessing ? "Importing…" : "Import"}
             </button>
+            {isProcessing && (
+              <div className="mt-2 space-y-1">
+                <div className="h-2 w-full rounded-full bg-slate-200 overflow-hidden">
+                  <div className="h-2 w-1/3 bg-slate-500 animate-pulse" />
+                </div>
+                <p className="text-xs text-slate-500">
+                  Processing large file on the server. This may take a minute; you can keep this tab
+                  open while it runs.
+                </p>
+              </div>
+            )}
           </form>
         )}
 
