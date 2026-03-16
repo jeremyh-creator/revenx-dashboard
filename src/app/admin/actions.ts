@@ -255,37 +255,30 @@ export async function uploadAppointmentsCsv(
 
   const supabase = await createClient();
 
-  async function getOrCreateAgentByEmail(email: string): Promise<string | null> {
-    const normalizedEmail = email.toLowerCase().trim();
-    const { data: agents } = await supabase
-      .from("agents")
-      .select("id, emails")
-      .overlaps("emails", [normalizedEmail])
-      .limit(1);
-
-    if (agents && agents.length > 0) return agents[0].id;
-
-    const displayName = normalizedEmail.split("@")[0].replace(/[._]/g, " ");
-    const { data: newAgent, error: insertError } = await supabase
-      .from("agents")
-      .insert({ name: displayName, emails: [normalizedEmail], is_active: true })
-      .select("id")
-      .single();
-
-    if (insertError) return null;
-    return newAgent?.id ?? null;
+  // Preload all agents once for fast in-memory lookups
+  const { data: allAgents } = await supabase
+    .from("agents")
+    .select("id, name, emails")
+    .order("name");
+  const emailToAgentId = new Map<string, string>();
+  const nameToAgentId = new Map<string, string>();
+  for (const a of allAgents ?? []) {
+    if (a.name) {
+      nameToAgentId.set(String(a.name).toLowerCase().trim(), a.id as string);
+    }
+    for (const e of (a.emails ?? []) as string[]) {
+      emailToAgentId.set(e.toLowerCase().trim(), a.id as string);
+    }
   }
 
-  async function getAgentByName(name: string): Promise<string | null> {
-    const trimmed = name.trim();
-    if (!trimmed) return null;
-    const { data } = await supabase
-      .from("agents")
-      .select("id")
-      .ilike("name", trimmed)
-      .limit(1)
-      .maybeSingle();
-    return data?.id ?? null;
+  function getAgentIdByEmail(email: string): string | null {
+    const normalized = email.toLowerCase().trim();
+    return emailToAgentId.get(normalized) ?? null;
+  }
+
+  function getAgentIdByName(name: string): string | null {
+    const trimmed = name.toLowerCase().trim();
+    return nameToAgentId.get(trimmed) ?? null;
   }
 
   const STATUS_MAP: Record<string, string> = {
@@ -376,10 +369,10 @@ export async function uploadAppointmentsCsv(
 
     let agentId: string | null = null;
     if (agentEmailRaw) {
-      agentId = await getOrCreateAgentByEmail(agentEmailRaw);
+      agentId = getAgentIdByEmail(agentEmailRaw);
     }
     if (!agentId && agentNameRaw) {
-      agentId = await getAgentByName(agentNameRaw);
+      agentId = getAgentIdByName(agentNameRaw);
     }
     if (!agentId) {
       errors.push(
