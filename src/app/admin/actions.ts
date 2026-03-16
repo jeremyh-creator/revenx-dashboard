@@ -307,6 +307,48 @@ export async function uploadAppointmentsCsv(
   let imported = 0;
   const errors: string[] = [];
 
+  // Batch rows to reduce round-trips and handle large files better
+  const batchSize = 500;
+  let pendingRows: {
+    row: {
+      agent_id: string;
+      prospect_email: string | null;
+      first_name: string | null;
+      last_name: string | null;
+      name: string | null;
+      appointment_datetime: string;
+      age_raw: string | null;
+      assets_raw: string | null;
+      utm_source: string | null;
+      prospect_questions: string | null;
+      status: string;
+      is_final_instance: boolean;
+    };
+    lineNumber: number;
+  }[] = [];
+
+  async function flushBatch() {
+    if (pendingRows.length === 0) return;
+    const { data, error } = await supabase
+      .from("appointments")
+      .insert(pendingRows.map((p) => p.row))
+      .select("id");
+    if (error) {
+      // If batch insert fails, fall back to per-row inserts to capture row-level errors
+      for (const p of pendingRows) {
+        const { error: rowError } = await supabase.from("appointments").insert(p.row);
+        if (rowError) {
+          errors.push(`Row ${p.lineNumber}: ${rowError.message}`);
+        } else {
+          imported++;
+        }
+      }
+    } else {
+      imported += data?.length ?? pendingRows.length;
+    }
+    pendingRows = [];
+  }
+
   for (let i = 1; i < lines.length; i++) {
     const values = parseCsvLine(lines[i]);
     if (values.length !== headers.length && values.every((v) => !v)) continue;
@@ -378,13 +420,13 @@ export async function uploadAppointmentsCsv(
       is_final_instance: true,
     };
 
-    const { error } = await supabase.from("appointments").insert(row);
-    if (error) {
-      errors.push(`Row ${i + 1}: ${error.message}`);
-    } else {
-      imported++;
+    pendingRows.push({ row, lineNumber: i + 1 });
+    if (pendingRows.length >= batchSize) {
+      await flushBatch();
     }
   }
+
+  await flushBatch();
 
   revalidatePath("/admin");
   return { imported, errors };
