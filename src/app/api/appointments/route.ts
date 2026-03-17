@@ -19,6 +19,8 @@ import { createClient } from "@/lib/supabase/server";
  * - assets_raw?: string
  * - utm_source?: string
  * - status?: string (default 'Confirmed')
+ * - external_source?: string (e.g. 'calendly', 'custom') - required if external_id provided
+ * - external_id?: string (e.g. Calendly Event UUID or custom calendar ID)
  *
  * Optional: X-API-Key header for Zapier/webhook auth (set API_SECRET in .env.local)
  */
@@ -38,11 +40,19 @@ export async function POST(request: NextRequest) {
       assets_raw,
       utm_source,
       status = "Confirmed",
+      external_source,
+      external_id,
     } = body;
 
     if (!agent_email || !appointment_datetime) {
       return NextResponse.json(
         { error: "agent_email and appointment_datetime are required" },
+        { status: 400 }
+      );
+    }
+    if ((external_source && !external_id) || (!external_source && external_id)) {
+      return NextResponse.json(
+        { error: "external_source and external_id must be provided together" },
         { status: 400 }
       );
     }
@@ -74,27 +84,66 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const { data: appointment, error } = await supabase
-      .from("appointments")
-      .insert({
-        agent_id: agent.id,
-        prospect_email: prospect_email || null,
-        first_name: first_name || null,
-        last_name: last_name || null,
-        name: name || null,
-        prospect_questions: prospect_questions || null,
-        appointment_datetime,
-        timezone,
-        age_raw: age_raw || null,
-        assets_raw: assets_raw || null,
-        utm_source: utm_source || null,
-        status,
-      })
-      .select("id, agent_id, appointment_datetime, status")
-      .single();
+    const basePayload = {
+      agent_id: agent.id,
+      prospect_email: prospect_email || null,
+      first_name: first_name || null,
+      last_name: last_name || null,
+      name: name || null,
+      prospect_questions: prospect_questions || null,
+      appointment_datetime,
+      timezone,
+      age_raw: age_raw || null,
+      assets_raw: assets_raw || null,
+      utm_source: utm_source || null,
+      status,
+      external_source: external_source || null,
+      external_id: external_id || null,
+      updated_at: new Date().toISOString(),
+    } as const;
 
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    // If external identifiers are provided, update existing appointment instead of creating duplicates.
+    let appointment:
+      | { id: string; agent_id: string; appointment_datetime: string; status: string }
+      | null = null;
+
+    if (external_source && external_id) {
+      const { data: existing, error: existingError } = await supabase
+        .from("appointments")
+        .select("id")
+        .eq("external_source", external_source)
+        .eq("external_id", external_id)
+        .limit(1)
+        .maybeSingle();
+
+      if (existingError) {
+        return NextResponse.json({ error: existingError.message }, { status: 500 });
+      }
+
+      if (existing?.id) {
+        const { data: updated, error: updateError } = await supabase
+          .from("appointments")
+          .update(basePayload)
+          .eq("id", existing.id)
+          .select("id, agent_id, appointment_datetime, status")
+          .single();
+        if (updateError) {
+          return NextResponse.json({ error: updateError.message }, { status: 500 });
+        }
+        appointment = updated;
+      }
+    }
+
+    if (!appointment) {
+      const { data: inserted, error: insertError } = await supabase
+        .from("appointments")
+        .insert(basePayload)
+        .select("id, agent_id, appointment_datetime, status")
+        .single();
+      if (insertError) {
+        return NextResponse.json({ error: insertError.message }, { status: 500 });
+      }
+      appointment = inserted;
     }
 
     return NextResponse.json({ success: true, appointment });
