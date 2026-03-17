@@ -50,7 +50,9 @@ export default async function AdminPage({ searchParams }: PageProps) {
       ? "agents"
       : params.tab === "enterprises"
         ? "enterprises"
-        : "appointments";
+        : params.tab === "reporting"
+          ? "reporting"
+          : "appointments";
 
   const { data: agents } = await supabase
     .from("agents")
@@ -201,6 +203,12 @@ export default async function AdminPage({ searchParams }: PageProps) {
               >
                 Enterprises
               </AdminTabLink>
+              <AdminTabLink
+                active={tab === "reporting"}
+                href="/admin?tab=reporting"
+              >
+                Reporting
+              </AdminTabLink>
             </div>
           </div>
 
@@ -211,6 +219,17 @@ export default async function AdminPage({ searchParams }: PageProps) {
               enterprises={enterprisesWithDetails}
               agents={agents ?? []}
             />
+          ) : tab === "reporting" ? (
+            <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-4">
+              <h3 className="font-semibold text-slate-900 mb-1">
+                Reporting (coming soon)
+              </h3>
+              <p className="text-sm text-slate-500">
+                This tab will show organization-wide show rates and 50+ metrics by
+                agent and rollup. For now, use the Appointments and Agents tabs
+                to inspect underlying data.
+              </p>
+            </div>
           ) : (
             <>
               <AdminCsvUpload agents={agents ?? []} />
