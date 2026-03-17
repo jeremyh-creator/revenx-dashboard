@@ -29,6 +29,7 @@ export function AdminCsvUpload({ agents }: Props) {
   const [isProcessing, setIsProcessing] = useState(false);
   const [result, setResult] = useState<{ imported: number; errors: string[] } | null>(null);
   const [estimatedRows, setEstimatedRows] = useState<number | null>(null);
+  const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
 
   function buildInitialMapping(headers: string[]): Record<string, string> {
     const normalized = headers.map((h) => ({
@@ -117,8 +118,37 @@ export function AdminCsvUpload({ agents }: Props) {
     }
     setIsProcessing(true);
     setResult(null);
+    setProgress(null);
+
     const csvText = await file.text();
-    const res = await uploadAppointmentsCsv(csvText, mapping);
+    const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length < 2) {
+      setIsProcessing(false);
+      setResult({ imported: 0, errors: ["CSV must have a header row and at least one data row"] });
+      return;
+    }
+
+    const header = lines[0];
+    const dataLines = lines.slice(1);
+
+    // Chunk uploads to avoid serverless timeouts (e.g. 9k+ rows)
+    const chunkSize = 1000;
+    const total = dataLines.length;
+    setProgress({ done: 0, total });
+
+    let importedTotal = 0;
+    const errorsTotal: string[] = [];
+
+    for (let offset = 0; offset < total; offset += chunkSize) {
+      const chunk = dataLines.slice(offset, offset + chunkSize);
+      const chunkCsv = [header, ...chunk].join("\n");
+      const res = await uploadAppointmentsCsv(chunkCsv, mapping);
+      importedTotal += res.imported;
+      errorsTotal.push(...res.errors);
+      setProgress({ done: Math.min(offset + chunk.length, total), total });
+    }
+
+    const res = { imported: importedTotal, errors: errorsTotal };
     setIsProcessing(false);
     setResult(res);
     if (res.imported > 0) setFile(null);
@@ -192,11 +222,22 @@ export function AdminCsvUpload({ agents }: Props) {
             {isProcessing && (
               <div className="mt-2 space-y-1">
                 <div className="h-2 w-full rounded-full bg-slate-200 overflow-hidden">
-                  <div className="h-2 w-1/3 bg-slate-500 animate-pulse" />
+                  <div
+                    className="h-2 bg-slate-700 transition-all"
+                    style={{
+                      width: progress
+                        ? `${Math.max(
+                            5,
+                            Math.min(100, Math.round((progress.done / progress.total) * 100))
+                          )}%`
+                        : "33%",
+                    }}
+                  />
                 </div>
                 <p className="text-xs text-slate-500">
-                  Processing large file on the server. This may take a minute; you can keep this tab
-                  open while it runs.
+                  {progress
+                    ? `Imported chunks: ${progress.done.toLocaleString()} / ${progress.total.toLocaleString()} rows processed…`
+                    : "Processing large file on the server. This may take a minute; keep this tab open."}
                 </p>
               </div>
             )}
