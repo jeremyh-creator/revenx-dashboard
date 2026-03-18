@@ -10,6 +10,7 @@ import {
 import { AdminAppointmentsPagination } from "./AdminAppointmentsPagination";
 import { AdminCsvUpload } from "./AdminCsvUpload";
 import { AdminEnterprisesSection } from "./AdminEnterprisesSection";
+import { isAge50OrUp } from "@/lib/showRate";
 
 const ALL_STATUSES = [
   "Confirmed",
@@ -35,6 +36,7 @@ type PageProps = {
     activeOnly?: string;
     page?: string;
     pageSize?: string;
+    rollupId?: string;
   }>;
 };
 
@@ -72,6 +74,29 @@ export default async function AdminPage({ searchParams }: PageProps) {
     agents: { agent_id: string }[];
     users: { id: string; email: string }[];
   }> = [];
+
+  let rollups: Array<{ id: string; name: string }> = [];
+  let selectedRollupId: string | null = null;
+  let reportingAppointments:
+    | Array<{
+        agent_id: string;
+        status: string;
+        appointment_datetime: string;
+        age_raw: string | null;
+      }>
+    | null = null;
+
+  type WindowMetric = {
+    label: string;
+    shows: number;
+    noShows: number;
+    showRatePercent: number | null;
+    age50Count: number;
+    age50Total: number;
+    age50Percent: number | null;
+  };
+
+  let reportingMetrics: WindowMetric[] = [];
 
   if (tab === "enterprises") {
     const { data: enterprises } = await supabase
@@ -157,6 +182,106 @@ export default async function AdminPage({ searchParams }: PageProps) {
     }));
   }
 
+  if (tab === "reporting") {
+    selectedRollupId = params.rollupId ? String(params.rollupId) : null;
+
+    const { data: r } = await supabase
+      .from("rollups")
+      .select("id, name")
+      .order("name");
+    rollups = r ?? [];
+
+    let query = supabase
+      .from("appointments")
+      .select("agent_id, status, appointment_datetime, age_raw");
+
+    if (selectedRollupId) {
+      const { data: agentRows } = await supabase
+        .from("agent_rollups")
+        .select("agent_id")
+        .eq("rollup_id", selectedRollupId);
+      const agentIds = (agentRows ?? []).map((row) => row.agent_id);
+      if (agentIds.length === 0) {
+        reportingAppointments = [];
+      } else {
+        query = query.in("agent_id", agentIds);
+      }
+    }
+
+    // If we already determined we have 0 appointments for this scope, skip the query.
+    if (reportingAppointments === null) {
+      const { data } = await query;
+      reportingAppointments = (data ?? []) as any;
+    }
+
+    const now = new Date();
+    const showStatuses = new Set(["Show"]);
+    const noShowStatuses = new Set([
+      "No-Show (Approved)",
+      "No-Show (Pending)",
+    ]);
+
+    const windows: Array<{ label: string; days: number | null }> = [
+      { label: "Lifetime", days: null },
+      { label: "Last 30 days", days: 30 },
+      { label: "Last 60 days", days: 60 },
+      { label: "Last 90 days", days: 90 },
+    ];
+
+    // Pre-parse timestamps once to keep per-window loops cheap.
+    const parsed = (reportingAppointments ?? []).map((a) => {
+      const dt = new Date(a.appointment_datetime);
+      return {
+        ...a,
+        parsedTime: dt.getTime(),
+      };
+    });
+
+    reportingMetrics = windows.map(({ label, days }) => {
+      let shows = 0;
+      let noShows = 0;
+
+      let age50Count = 0;
+      let age50Total = 0;
+
+      for (const appt of parsed) {
+        if (isNaN(appt.parsedTime)) continue;
+        if (days != null) {
+          const diffMs = now.getTime() - appt.parsedTime;
+          if (diffMs < 0) continue; // future appointments shouldn't count in "last N days"
+          const diffDays = diffMs / (1000 * 60 * 60 * 24);
+          if (diffDays > days) continue;
+        }
+
+        if (showStatuses.has(appt.status)) shows++;
+        if (noShowStatuses.has(appt.status)) noShows++;
+
+        if (appt.age_raw != null && String(appt.age_raw).trim() !== "") {
+          age50Total++;
+          if (isAge50OrUp(appt.age_raw)) age50Count++;
+        }
+      }
+
+      const showRatePercent =
+        shows + noShows > 0
+          ? Math.round((shows / (shows + noShows)) * 100)
+          : null;
+
+      const age50Percent =
+        age50Total > 0 ? Math.round((age50Count / age50Total) * 100) : null;
+
+      return {
+        label,
+        shows,
+        noShows,
+        showRatePercent,
+        age50Count,
+        age50Total,
+        age50Percent,
+      };
+    });
+  }
+
   return (
     <main className="min-h-screen p-8">
       <div className="max-w-6xl mx-auto">
@@ -221,14 +346,74 @@ export default async function AdminPage({ searchParams }: PageProps) {
             />
           ) : tab === "reporting" ? (
             <div className="bg-white rounded-xl border border-slate-200 p-6 shadow-sm space-y-4">
-              <h3 className="font-semibold text-slate-900 mb-1">
-                Reporting (coming soon)
-              </h3>
-              <p className="text-sm text-slate-500">
-                This tab will show organization-wide show rates and 50+ metrics by
-                agent and rollup. For now, use the Appointments and Agents tabs
-                to inspect underlying data.
-              </p>
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <h3 className="font-semibold text-slate-900">Reporting</h3>
+
+                <form
+                  method="get"
+                  action="/admin"
+                  className="flex flex-wrap items-center gap-2"
+                >
+                  <input type="hidden" name="tab" value="reporting" />
+                  <label className="text-sm text-slate-600">Scope:</label>
+                  <select
+                    name="rollupId"
+                    defaultValue={selectedRollupId ?? ""}
+                    className="rounded border border-slate-300 px-2 py-1.5 text-sm"
+                  >
+                    <option value="">All agents</option>
+                    {rollups.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="submit"
+                    className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+                  >
+                    Apply
+                  </button>
+                </form>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                {reportingMetrics.map((m) => (
+                  <div
+                    key={`show-${m.label}`}
+                    className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+                  >
+                    <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                      Show rate · {m.label}
+                    </p>
+                    <p className="mt-1 text-2xl font-semibold text-slate-900">
+                      {m.showRatePercent != null ? `${m.showRatePercent}%` : "—"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      {m.shows} shows / {m.noShows} no-shows (Approved + Pending)
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                {reportingMetrics.map((m) => (
+                  <div
+                    key={`age50-${m.label}`}
+                    className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm"
+                  >
+                    <p className="text-xs font-medium text-slate-500 uppercase tracking-wide">
+                      50+ age share · {m.label}
+                    </p>
+                    <p className="mt-1 text-2xl font-semibold text-slate-900">
+                      {m.age50Percent != null ? `${m.age50Percent}%` : "—"}
+                    </p>
+                    <p className="mt-1 text-xs text-slate-600">
+                      {m.age50Count} of {m.age50Total} appointments with age
+                    </p>
+                  </div>
+                ))}
+              </div>
             </div>
           ) : (
             <>
