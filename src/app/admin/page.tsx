@@ -11,6 +11,7 @@ import { AdminAppointmentsPagination } from "./AdminAppointmentsPagination";
 import { AdminCsvUpload } from "./AdminCsvUpload";
 import { AdminEnterprisesSection } from "./AdminEnterprisesSection";
 import { isAge50OrUp } from "@/lib/showRate";
+import { AdminReconcileButton } from "./AdminReconcileButton";
 
 const ALL_STATUSES = [
   "Confirmed",
@@ -191,27 +192,51 @@ export default async function AdminPage({ searchParams }: PageProps) {
       .order("name");
     rollups = r ?? [];
 
-    let query = supabase
-      .from("appointments")
-      .select("agent_id, status, appointment_datetime, age_raw");
-
+    let agentIdsForScope: string[] | null = null;
     if (selectedRollupId) {
       const { data: agentRows } = await supabase
         .from("agent_rollups")
         .select("agent_id")
         .eq("rollup_id", selectedRollupId);
-      const agentIds = (agentRows ?? []).map((row) => row.agent_id);
-      if (agentIds.length === 0) {
+      agentIdsForScope = (agentRows ?? []).map((row) => row.agent_id);
+      if (agentIdsForScope.length === 0) {
         reportingAppointments = [];
-      } else {
-        query = query.in("agent_id", agentIds);
       }
     }
 
-    // If we already determined we have 0 appointments for this scope, skip the query.
+    // Supabase will default-limit results to 1000 unless we page.
+    // We page through all rows so reporting works for 9k+ appointments.
     if (reportingAppointments === null) {
-      const { data } = await query;
-      reportingAppointments = (data ?? []) as any;
+      const pageSize = 1000;
+      let offset = 0;
+      const all: Array<{
+        agent_id: string;
+        status: string;
+        appointment_datetime: string;
+        age_raw: string | null;
+      }> = [];
+
+      while (true) {
+        let q = supabase
+          .from("appointments")
+          .select("agent_id, status, appointment_datetime, age_raw")
+          .order("appointment_datetime", { ascending: false })
+          .range(offset, offset + pageSize - 1);
+
+        if (agentIdsForScope) {
+          if (agentIdsForScope.length > 0) q = q.in("agent_id", agentIdsForScope);
+        }
+
+        const { data: page } = await q;
+        const rows = (page ?? []) as typeof all;
+        if (rows.length === 0) break;
+        all.push(...rows);
+
+        if (rows.length < pageSize) break;
+        offset += rows.length;
+      }
+
+      reportingAppointments = all;
     }
 
     const now = new Date();
@@ -375,6 +400,13 @@ export default async function AdminPage({ searchParams }: PageProps) {
                     Apply
                   </button>
                 </form>
+              </div>
+
+              <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                <p className="text-sm text-slate-500">
+                  Historical fix: update appointments still marked <span className="font-medium">Confirmed</span> but older than 14 days.
+                </p>
+                <AdminReconcileButton />
               </div>
 
               <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">

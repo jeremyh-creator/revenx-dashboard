@@ -554,3 +554,49 @@ export async function deleteEnterpriseUser(enterpriseUserId: string) {
   revalidatePath("/admin");
   return { success: true };
 }
+
+/**
+ * Reconcile appointments older than N days:
+ * - If status is still "Confirmed", update it to "Show".
+ *
+ * This is useful after bulk historical uploads, since the auto-flip only runs
+ * when an agent visits their dashboard.
+ */
+export async function reconcileConfirmedToShow(
+  windowDays: number = 14
+): Promise<{ updated: number } | { error: string }> {
+  const admin = await getAdminAuth();
+  if (!admin) return { error: "Unauthorized" };
+
+  const days = Number(windowDays);
+  if (!Number.isFinite(days) || days < 0) {
+    return { error: "Invalid windowDays" };
+  }
+
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - days);
+
+  const supabase = await createClient();
+
+  const { count, error: countError } = await supabase
+    .from("appointments")
+    .select("id", { count: "exact", head: true })
+    .eq("status", "Confirmed")
+    .lt("appointment_datetime", cutoffDate.toISOString());
+
+  if (countError) return { error: countError.message };
+
+  const { error: updateError } = await supabase
+    .from("appointments")
+    .update({
+      status: "Show",
+      updated_at: new Date().toISOString(),
+    })
+    .eq("status", "Confirmed")
+    .lt("appointment_datetime", cutoffDate.toISOString());
+
+  if (updateError) return { error: updateError.message };
+
+  revalidatePath("/admin");
+  return { updated: count ?? 0 };
+}
