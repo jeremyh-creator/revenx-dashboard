@@ -7,6 +7,7 @@ const DB_FIELDS = [
   { key: "agent_email", label: "Agent email (or use Agent name)", required: false },
   { key: "agent_name", label: "Agent name (or use Agent email)", required: false },
   { key: "appointment_datetime", label: "Appointment date/time", required: true },
+  { key: "external_id", label: "Event ID (required: Calendly UUID or Custom calendar ID)", required: true },
   { key: "prospect_email", label: "Prospect email", required: false },
   { key: "prospect_first_name", label: "Prospect first name", required: false },
   { key: "prospect_last_name", label: "Prospect last name", required: false },
@@ -30,6 +31,7 @@ export function AdminCsvUpload({ agents }: Props) {
   const [result, setResult] = useState<{ imported: number; errors: string[] } | null>(null);
   const [estimatedRows, setEstimatedRows] = useState<number | null>(null);
   const [progress, setProgress] = useState<{ done: number; total: number } | null>(null);
+  const [externalSource, setExternalSource] = useState<"calendly" | "custom">("calendly");
 
   function buildInitialMapping(headers: string[]): Record<string, string> {
     const normalized = headers.map((h) => ({
@@ -64,6 +66,14 @@ export function AdminCsvUpload({ agents }: Props) {
       "date",
       "scheduledat",
     ];
+    const externalIds = [
+      "eventuuid",
+      "eventid",
+      "uuid",
+      "event id",
+      "event uuid",
+      "id",
+    ];
     const prospectEmails = ["prospectemail", "inviteeemail", "clientemail"];
     const prospectNames = ["prospectname", "inviteename", "clientname"];
     const firstNames = ["firstname", "inviteefirstname", "clientfirstname"];
@@ -77,6 +87,9 @@ export function AdminCsvUpload({ agents }: Props) {
 
     const hStart = findHeader(startTimes);
     if (hStart) mapping["appointment_datetime"] = hStart;
+
+    const hExternalId = findHeader(externalIds);
+    if (hExternalId) mapping["external_id"] = hExternalId;
 
     const hProspectEmail = findHeader(prospectEmails);
     if (hProspectEmail) mapping["prospect_email"] = hProspectEmail;
@@ -116,6 +129,11 @@ export function AdminCsvUpload({ agents }: Props) {
       alert("Map either Agent email or Agent name");
       return;
     }
+    const hasExternalId = !!mapping["external_id"];
+    if (!hasExternalId) {
+      alert("Map the Event ID column to 'Event ID (required)'");
+      return;
+    }
     setIsProcessing(true);
     setResult(null);
     setProgress(null);
@@ -142,7 +160,7 @@ export function AdminCsvUpload({ agents }: Props) {
     for (let offset = 0; offset < total; offset += chunkSize) {
       const chunk = dataLines.slice(offset, offset + chunkSize);
       const chunkCsv = [header, ...chunk].join("\n");
-      const res = await uploadAppointmentsCsv(chunkCsv, mapping);
+      const res = await uploadAppointmentsCsv(chunkCsv, mapping, externalSource);
       importedTotal += res.imported;
       errorsTotal.push(...res.errors);
       setProgress({ done: Math.min(offset + chunk.length, total), total });
@@ -177,6 +195,19 @@ export function AdminCsvUpload({ agents }: Props) {
 
         {csvHeaders.length > 0 && (
           <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <p className="text-sm font-medium text-slate-700">Calendar source</p>
+              <select
+                value={externalSource}
+                onChange={(e) =>
+                  setExternalSource(e.target.value as "calendly" | "custom")
+                }
+                className="rounded border border-slate-300 px-3 py-1.5 text-sm"
+              >
+                <option value="calendly">Calendly</option>
+                <option value="custom">Revenx custom calendar</option>
+              </select>
+            </div>
             <p className="text-sm font-medium text-slate-700">Map columns:</p>
             {estimatedRows != null && (
               <p className="text-xs text-slate-500">

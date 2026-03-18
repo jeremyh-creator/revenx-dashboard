@@ -227,7 +227,8 @@ function parseCsvLine(line: string): string[] {
 
 export async function uploadAppointmentsCsv(
   csvText: string,
-  columnMapping: Record<string, string>
+  columnMapping: Record<string, string>,
+  externalSource: "calendly" | "custom"
 ): Promise<{ imported: number; errors: string[] }> {
   const admin = await getAdminAuth();
   if (!admin) {
@@ -240,8 +241,15 @@ export async function uploadAppointmentsCsv(
   if (!datetimeKey) {
     return { imported: 0, errors: ["appointment_datetime mapping is required"] };
   }
+  const externalIdKey = columnMapping["external_id"];
+  if (!externalIdKey) {
+    return { imported: 0, errors: ["external_id mapping is required"] };
+  }
   if (!agentEmailKey && !agentNameKey) {
     return { imported: 0, errors: ["Map either agent_email or agent_name"] };
+  }
+  if (externalSource !== "calendly" && externalSource !== "custom") {
+    return { imported: 0, errors: ["Invalid externalSource"] };
   }
 
   const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
@@ -314,6 +322,8 @@ export async function uploadAppointmentsCsv(
       assets_raw: string | null;
       utm_source: string | null;
       prospect_questions: string | null;
+      external_source: string;
+      external_id: string;
       status: string;
       is_final_instance: boolean;
     };
@@ -322,14 +332,22 @@ export async function uploadAppointmentsCsv(
 
   async function flushBatch() {
     if (pendingRows.length === 0) return;
+
+    // Upsert by external_source+external_id so re-imports (or cancel updates) don't create duplicates.
     const { data, error } = await supabase
       .from("appointments")
-      .insert(pendingRows.map((p) => p.row))
+      .upsert(pendingRows.map((p) => p.row), {
+        onConflict: "external_source,external_id",
+      })
       .select("id");
     if (error) {
       // If batch insert fails, fall back to per-row inserts to capture row-level errors
       for (const p of pendingRows) {
-        const { error: rowError } = await supabase.from("appointments").insert(p.row);
+        const { error: rowError } = await supabase
+          .from("appointments")
+          .upsert(p.row, {
+            onConflict: "external_source,external_id",
+          });
         if (rowError) {
           errors.push(`Row ${p.lineNumber}: ${rowError.message}`);
         } else {
@@ -358,6 +376,7 @@ export async function uploadAppointmentsCsv(
     const agentEmailRaw = getVal("agent_email");
     const agentNameRaw = getVal("agent_name");
     const datetimeRaw = getVal("appointment_datetime");
+    const externalIdRaw = getVal("external_id");
     if (!datetimeRaw) {
       errors.push(`Row ${i + 1}: missing appointment date/time`);
       continue;
@@ -378,6 +397,10 @@ export async function uploadAppointmentsCsv(
       errors.push(
         `Row ${i + 1}: agent not found for "${agentEmailRaw || agentNameRaw}" (create the agent first or use agent email to auto-create)`
       );
+      continue;
+    }
+    if (!externalIdRaw) {
+      errors.push(`Row ${i + 1}: missing external event ID (external_id)`);
       continue;
     }
 
@@ -409,6 +432,8 @@ export async function uploadAppointmentsCsv(
       assets_raw: getVal("assets_raw"),
       utm_source: getVal("utm_source"),
       prospect_questions: getVal("prospect_questions"),
+      external_source: externalSource,
+      external_id: externalIdRaw,
       status,
       is_final_instance: true,
     };

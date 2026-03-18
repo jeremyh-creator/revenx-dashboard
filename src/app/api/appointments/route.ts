@@ -19,8 +19,8 @@ import { createClient } from "@/lib/supabase/server";
  * - assets_raw?: string
  * - utm_source?: string
  * - status?: string (default 'Confirmed')
- * - external_source?: string (e.g. 'calendly', 'custom') - required if external_id provided
- * - external_id?: string (e.g. Calendly Event UUID or custom calendar ID)
+ * - external_source: string (required) - e.g. 'calendly' or 'custom'
+ * - external_id: string (required) - Calendly Event UUID or custom calendar event ID
  *
  * Optional: X-API-Key header for Zapier/webhook auth (set API_SECRET in .env.local)
  */
@@ -50,9 +50,20 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-    if ((external_source && !external_id) || (!external_source && external_id)) {
+    if (!external_source || !external_id) {
       return NextResponse.json(
-        { error: "external_source and external_id must be provided together" },
+        {
+          error:
+            "external_source and external_id are required to create/update appointments",
+        },
+        { status: 400 }
+      );
+    }
+
+    const source = String(external_source).toLowerCase().trim();
+    if (source !== "calendly" && source !== "custom") {
+      return NextResponse.json(
+        { error: "external_source must be 'calendly' or 'custom'" },
         { status: 400 }
       );
     }
@@ -97,8 +108,8 @@ export async function POST(request: NextRequest) {
       assets_raw: assets_raw || null,
       utm_source: utm_source || null,
       status,
-      external_source: external_source || null,
-      external_id: external_id || null,
+      external_source: source,
+      external_id: String(external_id),
       updated_at: new Date().toISOString(),
     } as const;
 
@@ -107,12 +118,12 @@ export async function POST(request: NextRequest) {
       | { id: string; agent_id: string; appointment_datetime: string; status: string }
       | null = null;
 
-    if (external_source && external_id) {
+    if (source && external_id) {
       const { data: existing, error: existingError } = await supabase
         .from("appointments")
         .select("id")
-        .eq("external_source", external_source)
-        .eq("external_id", external_id)
+        .eq("external_source", source)
+        .eq("external_id", String(external_id))
         .limit(1)
         .maybeSingle();
 
