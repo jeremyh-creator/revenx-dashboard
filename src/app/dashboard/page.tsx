@@ -37,16 +37,17 @@ export default async function DashboardPage({ searchParams }: PageProps) {
   const { agent } = auth;
   const supabase = await createClient();
 
-  // Auto-update to Show only when past the 14-day no-show window
-  // (Keeps Confirmed during 48h–14d so agent can still mark No-Show)
-  const fourteenDaysAgo = new Date();
-  fourteenDaysAgo.setDate(fourteenDaysAgo.getDate() - 14);
+  // Auto-update to Show after the 14-day no-show window.
+  // Keeps Confirmed during the 48h–14d period so agents can still mark No-Show.
+  const showAfterDays = 14;
+  const cutoffDate = new Date();
+  cutoffDate.setDate(cutoffDate.getDate() - showAfterDays);
   await supabase
     .from("appointments")
     .update({ status: "Show", updated_at: new Date().toISOString() })
     .eq("agent_id", agent.id)
     .eq("status", "Confirmed")
-    .lt("appointment_datetime", fourteenDaysAgo.toISOString());
+    .lt("appointment_datetime", cutoffDate.toISOString());
 
   const adminAuth = await getAdminAuth();
   const [showRate, showRatesRolling, age50PlusStats] = await Promise.all([

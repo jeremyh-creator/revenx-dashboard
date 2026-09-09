@@ -82,11 +82,14 @@ export async function getAgentShowRate(agentId: string): Promise<ShowRateResult>
     .from("appointments")
     .select("status")
     .eq("agent_id", agentId)
-    .in("status", ["Show", "No-Show (Approved)"]);
+    .in("status", ["Show", "No-Show (Approved)", "No-Show (Pending)"]);
 
   const shows = appointments?.filter((a) => a.status === "Show").length ?? 0;
   const noShows =
-    appointments?.filter((a) => a.status === "No-Show (Approved)").length ?? 0;
+    appointments?.filter(
+      (a) =>
+        a.status === "No-Show (Approved)" || a.status === "No-Show (Pending)"
+    ).length ?? 0;
   const total = shows + noShows;
 
   const showRatePercent =
@@ -142,13 +145,16 @@ export async function getAgentShowRatesRolling(
       .from("appointments")
       .select("status")
       .eq("agent_id", agentId)
-      .in("status", ["Show", "No-Show (Approved)"])
+      .in("status", ["Show", "No-Show (Approved)", "No-Show (Pending)"])
       .gte("appointment_datetime", since.toISOString())
       .lte("appointment_datetime", now.toISOString());
 
     const shows = data?.filter((a) => a.status === "Show").length ?? 0;
     const noShows =
-      data?.filter((a) => a.status === "No-Show (Approved)").length ?? 0;
+      data?.filter(
+        (a) =>
+          a.status === "No-Show (Approved)" || a.status === "No-Show (Pending)"
+      ).length ?? 0;
     result[key] = toWindow(shows, noShows);
   }
 

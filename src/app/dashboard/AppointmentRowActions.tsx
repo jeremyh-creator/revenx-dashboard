@@ -18,7 +18,8 @@ function canMarkNoShow(appointmentDatetime: string): boolean {
   const minTime = new Date();
   minTime.setHours(minTime.getHours() - 48);
   const maxTime = new Date(appointmentTime);
-  maxTime.setDate(maxTime.getDate() + 14);
+  const noShowWindowDays = 14;
+  maxTime.setDate(maxTime.getDate() + noShowWindowDays);
   return appointmentTime <= minTime && now <= maxTime;
 }
 
